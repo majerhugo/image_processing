@@ -256,12 +256,11 @@ def remap_labels(gt_loader):
         label_mapping (dict): Remapping map.
     """
 
-    # Collect all labels from the DataLoader to determine the unique labels
+    # Print unique original labels
     all_labels = []
     for _, label in gt_loader:
-        all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
+        all_labels.extend(label.numpy())
 
-    # Original unique labels
     original_labels, counts = np.unique(all_labels, return_counts=True)
     print("Original unique label values: ", original_labels, counts)
 
@@ -290,11 +289,11 @@ def remap_labels(gt_loader):
     # Create a new DataLoader with the remapped labels
     gt_loader_remapped = DataLoader(remapped_dataset, batch_size=gt_loader.batch_size, shuffle=False)
 
+    # Print remapped unique labels
     all_labels = []
     for _, label in gt_loader_remapped:
-        all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
+        all_labels.extend(label.numpy())
 
-    # Original unique labels
     remapped_labels, counts = np.unique(all_labels, return_counts=True)
     print("Remapped unique label values: ", remapped_labels, counts)
 
