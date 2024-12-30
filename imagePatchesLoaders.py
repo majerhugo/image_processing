@@ -191,7 +191,7 @@ class ImagePatchesDataset(Dataset):
             label = self.src_labels.read(1, window=central_window).item()
 
             # Return the patch and its label
-            return torch.tensor(patch_features, dtype=torch.float32), label
+            return torch.tensor(patch_features, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
 
         # If no reference raster, return only the image patch
         return torch.tensor(patch_features, dtype=torch.float32)
@@ -252,16 +252,14 @@ def remap_labels(gt_loader):
         gt_loader (DataLoader): Ground truth DataLoader with the original labels.
 
     Returns:
-        None: Labels in gt_loader are modified in place during iteration.
+        DataLoader: Ground Truth DataLoader with remapped labels.
+        label_mapping (dict): Remapping map.
     """
 
     # Collect all labels from the DataLoader to determine the unique labels
     all_labels = []
     for _, label in gt_loader:
-        if isinstance(label, torch.Tensor):
-            all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
-        else:
-            all_labels.append(label)  # If label is not tensor, it's a scalar (ground truth)
+        all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
 
     # Original unique labels
     original_labels, counts = np.unique(all_labels, return_counts=True)
@@ -270,7 +268,7 @@ def remap_labels(gt_loader):
     # Create a mapping from original labels to a continuous range starting from 0
     label_mapping = {label: idx for idx, label in enumerate(original_labels)}
 
-    # Create a new dataset with remapped labels
+    # Create new Torch Dataset with remapped labels
     class RemappedDataset(Dataset):
         def __init__(self, original_loader, label_mapping):
             self.original_loader = original_loader
@@ -281,10 +279,9 @@ def remap_labels(gt_loader):
 
         def __getitem__(self, idx):
             features, label = self.original_loader.dataset[idx]
-            if isinstance(label, torch.Tensor):
-                remapped_label = torch.tensor([self.label_mapping.get(l.item(), -1) for l in label])
-            else:
-                remapped_label = torch.tensor(self.label_mapping.get(label, -1))  # Handle scalar labels
+
+            remapped_label = torch.tensor(self.label_mapping.get(label.item(), -1))
+
             return features, remapped_label
 
     # Create the remapped dataset
@@ -295,24 +292,10 @@ def remap_labels(gt_loader):
 
     all_labels = []
     for _, label in gt_loader_remapped:
-        if isinstance(label, torch.Tensor):
-            all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
-        else:
-            all_labels.append(label)  # If label is not tensor, it's a scalar (ground truth)
+        all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
 
     # Original unique labels
-    original_labels, counts = np.unique(all_labels, return_counts=True)
-    print("Remapped unique label values: ", original_labels, counts)
+    remapped_labels, counts = np.unique(all_labels, return_counts=True)
+    print("Remapped unique label values: ", remapped_labels, counts)
 
-
-
-    # Calculate unique labels in the remapped DataLoader
-    # remapped_labels = set()
-    # for _, remapped_label in gt_loader_remapped:
-    #     remapped_labels.update(remapped_label.numpy())  # Add unique labels from each batch
-    #
-    # remapped_labels = np.array(sorted(remapped_labels))  # Sort and convert to numpy array for consistency
-    # print("New unique remapped label values: ", remapped_labels)
-
-    # Return the remapped DataLoader and the label_mapping
     return gt_loader_remapped, label_mapping
