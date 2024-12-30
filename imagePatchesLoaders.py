@@ -4,6 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from rasterio.io import MemoryFile
 import rioxarray
 import numpy as np
+import matplotlib.pyplot as plt
 
 def calculate_optimal_offsets(image_path, patch_size, stride):
     """
@@ -126,36 +127,38 @@ class ImagePatchesDataset(Dataset):
             print('Reference labels were provided, generating ground truth patches...')
 
             # open reference raster
-            with rio.open(reference_path) as src_labels:
-                self.src_labels = src_labels
-                self.background_label = background_label
+            self.src_labels = rio.open(reference_path)  # Open the reference raster here
 
-                # ensure the dimensions and CRS match
-                if self.src_features.width != self.src_labels.width or self.src_features.height != self.src_labels.height or self.src_features.crs != self.src_labels.crs:
-                    print("Dimensions or CRS do not match, aligning the reference raster to match the features raster...")
+            self.background_label = background_label
 
-                    # Use match_rasters to align the reference raster
-                    self.src_labels = match_rasters(reference_path, self.image_path)
+            # ensure the dimensions and CRS match
+            if self.src_features.width != self.src_labels.width \
+                    or self.src_features.height != self.src_labels.height \
+                    or self.src_features.crs != self.src_labels.crs:
+                print("Dimensions or CRS do not match, aligning the reference raster to match the features raster...")
 
-                # precompute patch positions (accounting for offsets)
-                self.patches = []
-                self.ground_truth_patches_count = 0  # Initialize count of ground truth patches
+                # Use match_rasters to align the reference raster
+                self.src_labels = match_rasters(reference_path, self.image_path)
 
-                for row in range(0, self.height - patch_size + 1, stride):
-                    for col in range(0, self.width - patch_size + 1, stride):
+            # precompute patch positions (accounting for offsets)
+            self.patches = []
+            self.ground_truth_patches_count = 0  # Initialize count of ground truth patches
 
-                        # Extract the central pixel from the reference raster (label)
-                        center_row = row + self.offset_top + self.patch_size // 2
-                        center_col = col + self.offset_left + self.patch_size // 2
-                        central_window = rio.windows.Window(center_col, center_row, 1, 1)
-                        label = self.src_labels.read(1, window=central_window).item()
+            for row in range(0, self.height - patch_size + 1, stride):
+                for col in range(0, self.width - patch_size + 1, stride):
 
-                        # Only include patches with valid labels (non-background)
-                        if label != self.background_label:
-                            self.patches.append((row, col))
-                            self.ground_truth_patches_count += 1  # Increment count for valid patches
+                    # Extract the central pixel from the reference raster (label)
+                    center_row = row + self.offset_top + self.patch_size // 2
+                    center_col = col + self.offset_left + self.patch_size // 2
+                    central_window = rio.windows.Window(center_col, center_row, 1, 1)
+                    label = self.src_labels.read(1, window=central_window).item()
 
-                print(f"Total ground truth patches generated: {self.ground_truth_patches_count}")
+                    # Only include patches with valid labels (non-background)
+                    if label != self.background_label:
+                        self.patches.append((row, col))
+                        self.ground_truth_patches_count += 1  # Increment count for valid patches
+
+            print(f"Total ground truth patches generated: {self.ground_truth_patches_count}")
 
         # reference raster and background label not provided - just tiling the image
         else:
