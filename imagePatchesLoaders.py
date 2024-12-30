@@ -3,6 +3,7 @@ import rasterio as rio
 from torch.utils.data import Dataset, DataLoader
 from rasterio.io import MemoryFile
 import rioxarray
+import numpy as np
 
 def calculate_optimal_offsets(image_path, patch_size, stride):
     """
@@ -112,47 +113,49 @@ class ImagePatchesDataset(Dataset):
             self.offset_top = offset_top
 
         # open the imagery
-        self.src_features = rio.open(image_path)
+        with rio.open(image_path) as src_features:
+            self.src_features = src_features
 
-        # adjust dimensions based on offsets
-        self.width = self.src_features.width - self.offset_left
-        self.height = self.src_features.height - self.offset_top
+            # adjust dimensions based on offsets
+            self.width = src_features.width - self.offset_left
+            self.height = src_features.height - self.offset_top
 
         # reference raster and background label provided
-        if reference_path is not None and background_label is not None:
+        if reference_path and background_label is not None:
 
             print('Reference labels were provided, generating ground truth patches...')
 
             # open reference raster
-            self.src_labels = rio.open(reference_path)
-            self.background_label = background_label
+            with rio.open(reference_path) as src_labels:
+                self.src_labels = src_labels
+                self.background_label = background_label
 
-            # ensure the dimensions and CRS match
-            if self.src_features.width != self.src_labels.width or self.src_features.height != self.src_labels.height or self.src_features.crs != self.src_labels.crs:
-                print("Dimensions or CRS do not match, aligning the reference raster to match the features raster...")
+                # ensure the dimensions and CRS match
+                if self.src_features.width != self.src_labels.width or self.src_features.height != self.src_labels.height or self.src_features.crs != self.src_labels.crs:
+                    print("Dimensions or CRS do not match, aligning the reference raster to match the features raster...")
 
-                # Use match_rasters to align the reference raster
-                self.src_labels = match_rasters(reference_path, self.image_path)
+                    # Use match_rasters to align the reference raster
+                    self.src_labels = match_rasters(reference_path, self.image_path)
 
-            # precompute patch positions (accounting for offsets)
-            self.patches = []
-            self.ground_truth_patches_count = 0  # Initialize count of ground truth patches
+                # precompute patch positions (accounting for offsets)
+                self.patches = []
+                self.ground_truth_patches_count = 0  # Initialize count of ground truth patches
 
-            for row in range(0, self.height - patch_size + 1, stride):
-                for col in range(0, self.width - patch_size + 1, stride):
+                for row in range(0, self.height - patch_size + 1, stride):
+                    for col in range(0, self.width - patch_size + 1, stride):
 
-                    # Extract the central pixel from the reference raster (label)
-                    center_row = row + self.offset_top + self.patch_size // 2
-                    center_col = col + self.offset_left + self.patch_size // 2
-                    central_window = rio.windows.Window(center_col, center_row, 1, 1)
-                    label = self.src_labels.read(1, window=central_window).item()
+                        # Extract the central pixel from the reference raster (label)
+                        center_row = row + self.offset_top + self.patch_size // 2
+                        center_col = col + self.offset_left + self.patch_size // 2
+                        central_window = rio.windows.Window(center_col, center_row, 1, 1)
+                        label = self.src_labels.read(1, window=central_window).item()
 
-                    # Only include patches with valid labels (non-background)
-                    if label != self.background_label:
-                        self.patches.append((row, col))
-                        self.ground_truth_patches_count += 1  # Increment count for valid patches
+                        # Only include patches with valid labels (non-background)
+                        if label != self.background_label:
+                            self.patches.append((row, col))
+                            self.ground_truth_patches_count += 1  # Increment count for valid patches
 
-            print(f"Total ground truth patches generated: {self.ground_truth_patches_count}")
+                print(f"Total ground truth patches generated: {self.ground_truth_patches_count}")
 
         # reference raster and background label not provided - just tiling the image
         else:
@@ -175,8 +178,9 @@ class ImagePatchesDataset(Dataset):
         col += self.offset_left
 
         # Extract the image patch
-        window = rio.windows.Window(col, row, self.patch_size, self.patch_size)
-        patch_features = self.src_features.read(window=window)  # Shape: (bands, patch_size, patch_size)
+        with rio.open(self.image_path) as src_features:
+            window = rio.windows.Window(col, row, self.patch_size, self.patch_size)
+            patch_features = src_features.read(window=window)  # Shape: (bands, patch_size, patch_size)
 
         # check if the reference raster was loaded
         if hasattr(self, 'src_labels'):
@@ -222,7 +226,7 @@ def GenerateImagePatchesLoaders(image_path, patch_size, stride, batch_size, offs
                                            )
 
     # If reference_path and background_label are provided, create a ground truth dataset
-    if reference_path is not None and background_label is not None:
+    if reference_path and background_label is not None:
 
         gt_dataset = ImagePatchesDataset(image_path=image_path,
                                          patch_size=patch_size,
@@ -238,3 +242,77 @@ def GenerateImagePatchesLoaders(image_path, patch_size, stride, batch_size, offs
 
     # If reference_path or background_label is not provided, return only the features dataset
     return DataLoader(features_dataset, batch_size=batch_size, shuffle=False)
+
+def remap_labels(gt_loader):
+    """
+    Remap labels in the ground truth loader to a continuous range starting from 0 (PyTorch requirement)
+    This function will overwrite the labels while iterating over the DataLoader.
+
+    Args:
+        gt_loader (DataLoader): Ground truth DataLoader with the original labels.
+
+    Returns:
+        None: Labels in gt_loader are modified in place during iteration.
+    """
+
+    # Collect all labels from the DataLoader to determine the unique labels
+    all_labels = []
+    for _, label in gt_loader:
+        if isinstance(label, torch.Tensor):
+            all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
+        else:
+            all_labels.append(label)  # If label is not tensor, it's a scalar (ground truth)
+
+    # Original unique labels
+    original_labels, counts = np.unique(all_labels, return_counts=True)
+    print("Original unique label values: ", original_labels, counts)
+
+    # Create a mapping from original labels to a continuous range starting from 0
+    label_mapping = {label: idx for idx, label in enumerate(original_labels)}
+
+    # Create a new dataset with remapped labels
+    class RemappedDataset(Dataset):
+        def __init__(self, original_loader, label_mapping):
+            self.original_loader = original_loader
+            self.label_mapping = label_mapping
+
+        def __len__(self):
+            return len(self.original_loader.dataset)
+
+        def __getitem__(self, idx):
+            features, label = self.original_loader.dataset[idx]
+            if isinstance(label, torch.Tensor):
+                remapped_label = torch.tensor([self.label_mapping.get(l.item(), -1) for l in label])
+            else:
+                remapped_label = torch.tensor(self.label_mapping.get(label, -1))  # Handle scalar labels
+            return features, remapped_label
+
+    # Create the remapped dataset
+    remapped_dataset = RemappedDataset(gt_loader, label_mapping)
+
+    # Create a new DataLoader with the remapped labels
+    gt_loader_remapped = DataLoader(remapped_dataset, batch_size=gt_loader.batch_size, shuffle=False)
+
+    all_labels = []
+    for _, label in gt_loader_remapped:
+        if isinstance(label, torch.Tensor):
+            all_labels.extend(label.numpy())  # Extend to keep all labels from the loader
+        else:
+            all_labels.append(label)  # If label is not tensor, it's a scalar (ground truth)
+
+    # Original unique labels
+    original_labels, counts = np.unique(all_labels, return_counts=True)
+    print("Remapped unique label values: ", original_labels, counts)
+
+
+
+    # Calculate unique labels in the remapped DataLoader
+    # remapped_labels = set()
+    # for _, remapped_label in gt_loader_remapped:
+    #     remapped_labels.update(remapped_label.numpy())  # Add unique labels from each batch
+    #
+    # remapped_labels = np.array(sorted(remapped_labels))  # Sort and convert to numpy array for consistency
+    # print("New unique remapped label values: ", remapped_labels)
+
+    # Return the remapped DataLoader and the label_mapping
+    return gt_loader_remapped, label_mapping
