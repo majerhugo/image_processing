@@ -84,169 +84,6 @@ def match_rasters(raster_to_change_path, raster_path):
 
         return memfile.open()
 
-class ImagePatchesDataset(Dataset):
-    def __init__(self, image_path, patch_size, stride, offset_left=0, offset_top=0, reference_path=None, background_label=None):
-        """
-            Dataset for extracting patches from an image (features).
-
-            Args:
-                image_path (str): Path to the image (features).
-                patch_size (int): Size of the square patches (in pixels), e.g. '32' will generate 32x32 patches.
-                stride (int): Step size between patches (in pixels).
-                offset_left (int | 'best'): Number of pixels to ignore from the left edge of the image.
-                    If '0' - no offset will be used.
-                    If 'best' - evenly distributed optimal offset will be calculated.
-                offset_top (int | 'best'): Number of pixels to ignore from the top edge of the image.
-                    If '0' - no offset will be used.
-                    If 'best' - evenly distributed optimal offset will be calculated.
-        """
-
-        self.image_path = image_path
-        self.patch_size = patch_size
-        self.stride = stride
-
-        if offset_left == 'best':
-            self.offset_left, _ = calculate_optimal_offsets(self.image_path, self.patch_size, self.stride)
-        else:
-            self.offset_left = offset_left
-        if offset_top == 'best':
-            _, self.offset_top = calculate_optimal_offsets(self.image_path, self.patch_size, self.stride)
-        else:
-            self.offset_top = offset_top
-
-        # open the imagery
-        with rio.open(image_path) as src_features:
-            self.src_features = src_features
-
-            # adjust dimensions based on offsets
-            self.width = src_features.width - self.offset_left
-            self.height = src_features.height - self.offset_top
-
-        # reference raster and background label provided
-        if reference_path and background_label is not None:
-
-            print('Reference labels were provided, generating ground truth patches...')
-
-            # open reference raster
-            self.src_labels = rio.open(reference_path)  # Open the reference raster here
-
-            self.background_label = background_label
-
-            # ensure the dimensions and CRS match
-            if self.src_features.width != self.src_labels.width \
-                    or self.src_features.height != self.src_labels.height \
-                    or self.src_features.crs != self.src_labels.crs:
-                print("Dimensions or CRS do not match, aligning the reference raster to match the features raster...")
-
-                # Use match_rasters to align the reference raster
-                self.src_labels = match_rasters(reference_path, self.image_path)
-
-            # precompute patch positions (accounting for offsets)
-            self.patches = []
-            self.ground_truth_patches_count = 0  # Initialize count of ground truth patches
-
-            for row in range(0, self.height - patch_size + 1, stride):
-                for col in range(0, self.width - patch_size + 1, stride):
-
-                    # Extract the central pixel from the reference raster (label)
-                    center_row = row + self.offset_top + self.patch_size // 2
-                    center_col = col + self.offset_left + self.patch_size // 2
-                    central_window = rio.windows.Window(center_col, center_row, 1, 1)
-                    label = self.src_labels.read(1, window=central_window).item()
-
-                    # Only include patches with valid labels (non-background)
-                    if label != self.background_label:
-                        self.patches.append((row, col))
-                        self.ground_truth_patches_count += 1  # Increment count for valid patches
-
-            print(f"Total ground truth patches generated: {self.ground_truth_patches_count}")
-
-        # reference raster and background label not provided - just tiling the image
-        else:
-
-            # Precompute patch positions (accounting for offsets)
-            self.patches = [
-                (row, col)
-                for row in range(0, self.height - patch_size + 1, stride)
-                for col in range(0, self.width - patch_size + 1, stride)
-            ]
-
-            print(f"Total patches generated: {len(self.patches)}")
-
-    def __len__(self):
-        return len(self.patches)
-
-    def __getitem__(self, idx):
-        row, col = self.patches[idx]
-        row += self.offset_top
-        col += self.offset_left
-
-        # Extract the image patch
-        with rio.open(self.image_path) as src_features:
-            window = rio.windows.Window(col, row, self.patch_size, self.patch_size)
-            patch_features = src_features.read(window=window)  # Shape: (bands, patch_size, patch_size)
-
-        # check if the reference raster was loaded
-        if hasattr(self, 'src_labels'):
-            # Extract the central pixel from the reference raster (label)
-            center_row = row + self.patch_size // 2
-            center_col = col + self.patch_size // 2
-            central_window = rio.windows.Window(center_col, center_row, 1, 1)
-            label = self.src_labels.read(1, window=central_window).item()
-
-            # Return the patch and its label
-            return torch.tensor(patch_features, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
-
-        # If no reference raster, return only the image patch
-        return torch.tensor(patch_features, dtype=torch.float32)
-
-def GenerateImagePatchesLoaders(image_path, patch_size, stride, batch_size, offset_left=0, offset_top=0, reference_path=None, background_label=None):
-    """
-    Generate DataLoaders for image patches and optionally for ground truth labels.
-
-    Args:
-        image_path (str): Path to the image (features).
-        patch_size (int): Size of the square patches (in pixels).
-        stride (int): Step size between patches (in pixels).
-        batch_size (int): Number of patches per batch.
-        offset_left (int | 'best'): Offset from the left edge of the image.
-        offset_top (int | 'best'): Offset from the top edge of the image.
-        reference_path (str, optional): Path to the reference raster (labels). Default is None.
-        background_label (int, optional): Label value to ignore as background. Default is None.
-
-    Returns:
-        If reference_path and background_label are provided:
-            (DataLoader, DataLoader): Features DataLoader and Ground Truth DataLoader.
-        Otherwise:
-            DataLoader: Features DataLoader only.
-    """
-
-    # Create the features dataset
-    features_dataset = ImagePatchesDataset(image_path=image_path,
-                                           patch_size=patch_size,
-                                           stride=stride,
-                                           offset_left=offset_left,
-                                           offset_top=offset_top
-                                           )
-
-    # If reference_path and background_label are provided, create a ground truth dataset
-    if reference_path and background_label is not None:
-
-        gt_dataset = ImagePatchesDataset(image_path=image_path,
-                                         patch_size=patch_size,
-                                         stride=stride,
-                                         offset_left=offset_left,
-                                         offset_top=offset_top,
-                                         reference_path=reference_path,
-                                         background_label=background_label
-                                         )
-
-        # Return both datasets
-        return DataLoader(features_dataset, batch_size=batch_size, shuffle=False), DataLoader(gt_dataset, batch_size=batch_size, shuffle=False)
-
-    # If reference_path or background_label is not provided, return only the features dataset
-    return DataLoader(features_dataset, batch_size=batch_size, shuffle=False)
-
 def remap_labels(gt_loader):
     """
     Remap labels in the ground truth loader to a continuous range starting from 0 (PyTorch requirement)
@@ -266,10 +103,10 @@ def remap_labels(gt_loader):
         all_labels.extend(label.numpy())
 
     original_labels, counts = np.unique(all_labels, return_counts=True)
-    print("Original unique label values: ", original_labels, counts)
+    print(f"Original unique label values:  {original_labels}, Counts: {counts}")
 
     # Create a mapping from original labels to a continuous range starting from 0
-    label_mapping = {label: idx for idx, label in enumerate(original_labels)}
+    label_mapping = {label: new_label for new_label, label in enumerate(original_labels)}
 
     # Create new Torch Dataset with remapped labels
     class RemappedDataset(Dataset):
@@ -283,6 +120,7 @@ def remap_labels(gt_loader):
         def __getitem__(self, idx):
             features, label = self.original_loader.dataset[idx]
 
+            # from created label map get corresponding new label
             remapped_label = torch.tensor(self.label_mapping.get(label.item(), -1))
 
             return features, remapped_label
@@ -299,21 +137,24 @@ def remap_labels(gt_loader):
         all_labels.extend(label.numpy())
 
     remapped_labels, counts = np.unique(all_labels, return_counts=True)
-    print("Remapped unique label values: ", remapped_labels, counts)
+    print(f"Remapped unique label values: {remapped_labels}, Counts: {counts}")
 
     return gt_loader_remapped, label_mapping
 
+def normalize(array):
+    array_min, array_max = array.min(), array.max()
+    return (array - array_min) / (array_max - array_min)
 
-def visualize_random_ground_truth_patches(gt_loader, patches_per_class=2):
+def visualize_labeled_patches(gt_loader, patches_per_class=2, bands=None):
     """
-    Visualize random ground truth patches for each class in the DataLoader.
+    Visualize defined number of labeled patches for each class from the DataLoader of labeled classes.
 
     Args:
-        gt_loader (DataLoader): Ground truth DataLoader with patches and labels.
-        patches_per_class (int): Number of random patches to display per class.
+        gt_loader (DataLoader): DataLoader of labeled patches.
+        patches_per_class (int): Number of patches to display per class. Patches are selected randomly. (default=2)
+        bands (tuple): Band order for composite visualization, eg. (0,1,2) will be RGB composite. If not specified
+            greyscale patches will be displayed (default).
 
-    Returns:
-        None
     """
 
     # Dictionary to store patches by label
@@ -321,55 +162,91 @@ def visualize_random_ground_truth_patches(gt_loader, patches_per_class=2):
 
     # Iterate through the DataLoader and collect patches for each class
     for features, labels in gt_loader:
-        batch_size = features.size(0)  # Number of patches in the current batch (256)
+
+        # get the size of current batch
+        batch_size = features.size(0)
 
         # Iterate through all patches in the batch
-        for i in range(batch_size):
-            label = labels[i].item()  # Get label for the current patch
+        for patch_index in range(batch_size):
 
-            # If this label is not in the dictionary, initialize an empty list for patches
+            # Get label for the current patch
+            label = labels[patch_index].item()
+
+            # if label is not in dictionary, initialize an empty list for patches
             if label not in class_patches:
                 class_patches[label] = []
 
-            # Append the patch to the corresponding class list
-            class_patches[label].append(features[i])
+            # append the patch to the corresponding class list
+            class_patches[label].append(features[patch_index])
 
-    print(class_patches.keys())
-    print(len(class_patches[8]))
-    print(class_patches[8][50])
+    # set up the plotting grid: columns = num_classes; rows = patches per class
+    num_classes = len(class_patches)
 
-    # Check that we have enough classes
-    # if len(class_patches) < 1:
-    #     print("Error: No patches were collected for any class.")
-    #     return
-    #
-    # # Set up the plotting grid: num_classes x patches_per_class
-    # num_classes = len(class_patches)
-    # fig, axes = plt.subplots(num_classes, patches_per_class, figsize=(8, 4 * num_classes))
-    #
-    # # Ensure axes is iterable even when there's only one class
-    # if num_classes == 1:
-    #     axes = [axes]
-    #
-    # # Loop through each class and select random patches to display
-    # for idx, (label, patches) in enumerate(class_patches.items()):
-    #     # Select random patches for the current class
-    #     selected_patches = random.sample(patches, patches_per_class)
-    #
-    #     # Loop through selected patches and plot them
-    #     for j, patch in enumerate(selected_patches):
-    #         ax = axes[idx][j] if num_classes > 1 else axes[j]
-    #
-    #         # Convert the patch to numpy array and remove the channel dimension if necessary
-    #         patch_image = patch[0].squeeze().numpy()  # Assuming the patches are (channels, height, width)
-    #
-    #         # Plot the patch
-    #         ax.imshow(patch_image, cmap='gray')
-    #         ax.set_title(f"Class {label} - Patch {j + 1}")
-    #         ax.axis('off')
-    #
-    # plt.tight_layout()
-    # plt.show()
+    # sort dictionary
+    class_patches = {key: value for key, value in sorted(class_patches.items())}
+
+    fig, axes = plt.subplots(nrows=patches_per_class, ncols=num_classes)
+
+    # ensure axes is iterable even when there's only one class
+    if num_classes == 1:
+        axes = [axes]
+
+    # Loop through each class and select random patches to display
+    for idx, (label, patches) in enumerate(class_patches.items()):
+        # Select random patches for the current class
+        selected_patches = random.sample(patches, patches_per_class)
+
+        # Loop through selected patches and plot them
+        for j, patch in enumerate(selected_patches):
+            ax = axes[j][idx] if num_classes > 1 else axes[j]
+
+            # color composite patches
+            if bands is not None:
+                b1 = normalize(patch[bands[0]].squeeze().numpy())
+                b2 = normalize(patch[bands[1]].squeeze().numpy())
+                b3 = normalize(patch[bands[2]].squeeze().numpy())
+
+                patch_image = np.array([b1, b2, b3])
+                patch_image = np.transpose(patch_image, axes=(1, 2, 0))
+
+                # highlight center pixel
+                center_row = patch_image.shape[0] // 2
+                center_col = patch_image.shape[1] // 2
+                patch_image[center_row, center_col, :] = 1
+
+                ax.imshow(patch_image)
+                ax.set_title(f"Class {label} - Patch {j + 1}")
+                ax.axis('off')
+
+            # grayscale patches
+            else:
+                # patch to numpy array and remove the channel dimensions
+                patch_image = normalize(patch[0].squeeze().numpy())
+
+                # highlight center pixel
+                center_row = patch_image.shape[0] // 2
+                center_col = patch_image.shape[1] // 2
+                patch_image[center_row, center_col] = 1
+
+                ax.imshow(patch_image, cmap='gray')
+                ax.set_title(f"Class {label} - Patch {j + 1}")
+                ax.axis('off')
+
+    # maximizing figure size
+    try:
+        mng = plt.get_current_fig_manager()
+        mng.window.showMaximized()
+    except:
+        plot_backend = plt.get_backend()
+        if plot_backend == 'TkAgg':
+            mng.resize(*mng.window.maxsize())
+        elif plot_backend == 'wxAgg':
+            mng.frame.Maximize(True)
+        elif plot_backend == 'Qt4Agg':
+            mng.window.showMaximized()
+
+    plt.tight_layout()
+    plt.show()
 
 class FeaturePatchesDataset(Dataset):
     def __init__(self, image_path, patch_size, stride, offset_left=0, offset_top=0):
