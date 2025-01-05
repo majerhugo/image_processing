@@ -1,3 +1,18 @@
+# todo: fcia, kt. bude normalizovat patchky v DataLoaderoch
+# todo: fcia, kt. bude augmentovat treningove patchky v DataLoaderu
+# todo: funkcia na remap labels naspat (vstup bude vektor predikcie)
+# todo: zmenit calculate_optimal_offsets aby nemusela otvarat image z filepathu, ale aby mala na vstupe uz otvoreny
+#  image alebo rovno dimenzie obrazku, nasledne bude treba upravit FeaturePatchesDataset a LabeledPatchesDataset aby
+#  sa tato funkcia volala az po otvoreni obrazku
+# todo: fcia, ktora vezme vektorove GT polygony a spravi stratif. rozdelenie na train/test (tuto fciu mozno netreba)
+# todo: fcia na rasterizaciu GT polygonov, ktore boli apriori rozdelene na train/test (tato bude treba tak ci tak)
+# todo: fcia, kt. po klasifikacii patchiek ich posklada naspat do mapy (tam potencialne vyuzit fciu calculate_patches)
+# todo: fcia, kt. bude generovat patchky ne do DataLoaderov, ale ulozi ich na disk ako .pt alebo .npy, pripadne .h5,
+#  tu sa bude dat zrecyklovat fcia z img_tiling_no_memory.py
+# todo: fcia, kt. bude generovat patchky na disk ako GeoTiffy (zrecyklovat zase stary kod)
+
+# todo: implementovat fcie pre generaciu patchiek na semanticku segmentaciu
+
 import torch
 import rasterio as rio
 from torch.utils.data import Dataset, DataLoader
@@ -463,3 +478,30 @@ def generate_labeled_patches_loader(image_path, reference_path, patch_size, stri
                                             background_label=background_label)
 
     return DataLoader(labeled_dataset, batch_size=batch_size, shuffle=shuffle)
+
+def calculate_patches(image_path, patch_size, stride, offset_left, offset_top):
+    """
+    Calculate the number of patches in a row and column for an image.
+
+    Args:
+        image_width (int): Width of the image in pixels.
+        image_height (int): Height of the image in pixels.
+        patch_size (int): Size of the square patches (in pixels).
+        stride (int): Step size between patches (in pixels).
+        offset_left (int): Offset from the left of the image in pixels.
+        offset_top (int): Offset from the top of the image in pixels.
+
+    Returns:
+        (int, int): Number of patches in a row, number of patches in a column
+    """
+
+    # get image width and height
+    img = rio.open(image_path)
+    img_width = img.width
+    img_height = img.height
+
+    # pozor na +1!
+    num_patches_row = ((img_width - offset_left - patch_size) // stride) + 1
+    num_patches_col = ((img_height - offset_top - patch_size) // stride) + 1
+
+    return num_patches_row, num_patches_col
