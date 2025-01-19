@@ -1,5 +1,9 @@
 # todo: fcia, kt. bude normalizovat patchky v DataLoaderoch
+    # mean a std na normalizaciu treba vzdy odvodit len z trenovacich dat a nasledne pomocou nich normnalizovat
+    # aj testovacie data a aj tie, na ktorych bude pustena predikcia
+    # ASI HOTOVO
 # todo: fcia, kt. bude augmentovat treningove patchky v DataLoaderu
+    # CHECKNUT CI JE SPRAVNE SPRAVENA...
 # todo: funkcia na remap labels naspat (vstup bude vektor predikcie)
 # todo: zmenit calculate_optimal_offsets aby nemusela otvarat image z filepathu, ale aby mala na vstupe uz otvoreny
 #  image alebo rovno dimenzie obrazku, nasledne bude treba upravit FeaturePatchesDataset a LabeledPatchesDataset aby
@@ -21,6 +25,8 @@ import rioxarray
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+from torchvision.transforms import v2 as transforms
+torch.set_printoptions(precision=6, sci_mode=False)
 
 def calculate_optimal_offsets(image_path, patch_size, stride):
     """
@@ -57,6 +63,7 @@ def calculate_optimal_offsets(image_path, patch_size, stride):
 def match_rasters(raster_to_change_path, raster_path):
     raster_to_change = rioxarray.open_rasterio(raster_to_change_path, masked=True)
     raster = rioxarray.open_rasterio(raster_path, masked=True)
+
     raster_to_change = raster_to_change.drop_vars("band").squeeze()
     raster = raster.drop_vars("band").squeeze()
 
@@ -213,7 +220,7 @@ def visualize_labeled_patches(gt_loader, patches_per_class=2, bands=None):
 
         # Loop through selected patches and plot them
         for j, patch in enumerate(selected_patches):
-            ax = axes[j][idx] if num_classes > 1 else axes[j]
+            ax = axes[j][idx] if num_classes > 1 else axes[idx]
 
             # color composite patches
             if bands is not None:
@@ -262,6 +269,121 @@ def visualize_labeled_patches(gt_loader, patches_per_class=2, bands=None):
 
     plt.tight_layout()
     plt.show()
+
+def get_normalization_parameters(training_loader):
+    mean = 0
+    std = 0
+    total_pixels = 0
+
+    # get mean and std for each batch in loader
+    for patches, _ in training_loader:
+
+        # flatten the patches tensor to (batch_size, C, H*W)
+        pixels = patches.view(patches.size(0), patches.size(1), -1)
+
+        mean += pixels.mean(dim=(0, 2)) * patches.size(0)
+        std += pixels.std(dim=(0, 2)) * patches.size(0)
+
+        total_pixels += patches.size(0)
+
+    # get the resulting mean and std
+    mean /= total_pixels
+    std /= total_pixels
+
+    return mean, std
+
+def normalize_loader(original_loader, means, stds):
+
+    for batch in original_loader:
+
+        # loader with labels
+        if len(batch) == 2:
+            # create new Torch Dataset with labels
+            class NormalizedDataset(Dataset):
+                def __init__(self, original_loader, means, stds):
+                    self.original_loader = original_loader
+                    self.means = means
+                    self.stds = stds
+                    self.normalization = transforms.Normalize(mean=self.means, std=self.stds)
+
+                def __len__(self):
+                    return len(self.original_loader.dataset)
+
+                def __getitem__(self, idx):
+                    features, label = self.original_loader.dataset[idx]
+
+                    norm_features = self.normalization(features)
+
+                    return norm_features, label
+
+        # loader without labels
+        else:
+            # create new Torch Dataset without labels
+            class NormalizedDataset(Dataset):
+                def __init__(self, original_loader, means, stds):
+                    self.original_loader = original_loader
+                    self.means = means
+                    self.stds = stds
+                    self.normalization = transforms.Normalize(mean=self.means, std=self.stds)
+
+                def __len__(self):
+                    return len(self.original_loader.dataset)
+
+                def __getitem__(self, idx):
+                    features = self.original_loader.dataset[idx]
+
+                    norm_features = self.normalization(features)
+
+                    return norm_features
+
+        norm_dataset = NormalizedDataset(original_loader, means, stds)
+        norm_loader = DataLoader(norm_dataset, batch_size=original_loader.batch_size, shuffle=False)
+
+        return norm_loader
+
+# checknut ci je spravne spravena...
+def augment_loader(original_loader, transform, num_augmented_samples):
+    """
+    Augments the features in the dataloader and includes the original samples.
+
+    Parameters:
+    - original_loader (DataLoader): The original dataloader with features and labels.
+    - transform (transform): PyTorch transformation object that defines augmentation (e.g., flipping, rotation).
+    - num_augmented_samples (int): Number of augmented versions to create for each feature, including the original.
+    """
+
+    class AugmentedDataset(Dataset):
+        def __init__(self, original_loader, transform, num_augmented_samples):
+            self.original_loader = original_loader
+            self.transform = transform
+            self.num_augmented_samples = num_augmented_samples
+
+        def __len__(self):
+            return len(self.original_loader.dataset) * (self.num_augmented_samples + 1)  # +1 to include the original sample
+
+        def __getitem__(self, idx):
+            # Determine if this is an original or augmented sample
+            original_idx = idx // (self.num_augmented_samples + 1)  # original sample index
+            augmented_idx = idx % (self.num_augmented_samples + 1)  # augmented sample index (or original)
+
+            features, label = self.original_loader.dataset[original_idx]
+
+            if augmented_idx == 0:
+                # Return the original sample
+                return features, label
+            else:
+                # Apply the transformation to generate an augmented sample
+                augmented_features = self.transform(features)
+                return augmented_features, label
+
+    # Create a new augmented dataset (including the original samples)
+    augmented_dataset = AugmentedDataset(original_loader, transform, num_augmented_samples)
+    print(f"Augmented dataset has {len(augmented_dataset)} patches.")
+
+    # Create a new DataLoader with the augmented dataset
+    augmented_loader = DataLoader(augmented_dataset, batch_size=original_loader.batch_size, shuffle=True)
+
+    return augmented_loader
 
 class FeaturePatchesDataset(Dataset):
     def __init__(self, image_path, patch_size, stride, offset_left=0, offset_top=0):
